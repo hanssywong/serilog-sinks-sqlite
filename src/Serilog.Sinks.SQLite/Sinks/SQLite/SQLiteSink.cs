@@ -133,8 +133,12 @@ namespace Serilog.Sinks.SQLite
             var colDefs = "id INTEGER PRIMARY KEY AUTOINCREMENT,";
             colDefs += "Timestamp TEXT,";
             colDefs += "Level VARCHAR(10),";
-            colDefs += "Exception TEXT,";
+            colDefs += "ThreadId INTEGER,";
             colDefs += "RenderedMessage TEXT,";
+            colDefs += "Exception TEXT,";
+            colDefs += "SourceContext TEXT,";
+            colDefs += "MachineName TEXT,";
+            colDefs += "MemoryUsage BIGINT,";
             colDefs += "Properties TEXT";
 
             var sqlCreateText = $"CREATE TABLE IF NOT EXISTS {_tableName} ({colDefs})";
@@ -145,8 +149,8 @@ namespace Serilog.Sinks.SQLite
 
         private SQLiteCommand CreateSqlInsertCommand(SQLiteConnection connection)
         {
-            var sqlInsertText = "INSERT INTO {0} (Timestamp, Level, Exception, RenderedMessage, Properties)";
-            sqlInsertText += " VALUES (@timeStamp, @level, @exception, @renderedMessage, @properties)";
+            var sqlInsertText = "INSERT INTO {0} (Timestamp, Level, Exception, RenderedMessage, Properties, ThreadId, MachineName, MemoryUsage, SourceContext)";
+            sqlInsertText += " VALUES (@timeStamp, @level, @exception, @renderedMessage, @properties, @threadid, @machinename, @memoryusage, @sourcecontext)";
             sqlInsertText = string.Format(sqlInsertText, _tableName);
 
             var sqlCommand = connection.CreateCommand();
@@ -158,6 +162,10 @@ namespace Serilog.Sinks.SQLite
             sqlCommand.Parameters.Add(new SQLiteParameter("@exception", DbType.String));
             sqlCommand.Parameters.Add(new SQLiteParameter("@renderedMessage", DbType.String));
             sqlCommand.Parameters.Add(new SQLiteParameter("@properties", DbType.String));
+            sqlCommand.Parameters.Add(new SQLiteParameter("@threadid", DbType.Int16));
+            sqlCommand.Parameters.Add(new SQLiteParameter("@machinename", DbType.String));
+            sqlCommand.Parameters.Add(new SQLiteParameter("@memoryusage", DbType.Int64));
+            sqlCommand.Parameters.Add(new SQLiteParameter("@sourcecontext", DbType.String));
 
             return sqlCommand;
         }
@@ -274,10 +282,25 @@ namespace Serilog.Sinks.SQLite
                             ? logEvent.Timestamp.ToUniversalTime().ToString(TimestampFormat)
                             : logEvent.Timestamp.ToString(TimestampFormat);
                         sqlCommand.Parameters["@level"].Value = logEvent.Level.ToString();
-                        sqlCommand.Parameters["@exception"].Value =
-                            logEvent.Exception?.ToString() ?? string.Empty;
+                        if (logEvent.Properties.ContainsKey("ThreadId") && int.TryParse(logEvent.Properties["ThreadId"].ToString(), out int ThreadId))
+                        {
+                            sqlCommand.Parameters["@threadid"].Value = ThreadId;
+                        }
+                        sqlCommand.Parameters["@exception"].Value = logEvent.Exception?.ToString();
                         sqlCommand.Parameters["@renderedMessage"].Value = logEvent.MessageTemplate.Render(logEvent.Properties, _formatProvider);
 
+                        if (logEvent.Properties.ContainsKey("MachineName"))
+                        {
+                            sqlCommand.Parameters["@machinename"].Value = logEvent.Properties["MachineName"]?.ToString();
+                        }
+                        if (logEvent.Properties.ContainsKey("MemoryUsage") && int.TryParse(logEvent.Properties["MemoryUsage"].ToString(), out int MemoryUsage))
+                        {
+                            sqlCommand.Parameters["@memoryusage"].Value = MemoryUsage;
+                        }
+                        if (logEvent.Properties.ContainsKey("SourceContext"))
+                        {
+                            sqlCommand.Parameters["@sourcecontext"].Value = logEvent.Properties["SourceContext"]?.ToString();
+                        }
                         sqlCommand.Parameters["@properties"].Value = logEvent.Properties.Count > 0
                             ? logEvent.Properties.Json()
                             : string.Empty;
