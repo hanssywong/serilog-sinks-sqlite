@@ -115,11 +115,11 @@ namespace Serilog.Sinks.SQLite
             var sqlConString = new SQLiteConnectionStringBuilder
             {
                 DataSource = _databasePath,
-                JournalMode = SQLiteJournalModeEnum.Memory,
+                JournalMode = SQLiteJournalModeEnum.Wal,
                 SyncMode = SynchronizationModes.Normal,
                 CacheSize = 500,
                 PageSize = (int)MaxSupportedPageSize,
-                MaxPageCount = (int)(_maxDatabaseSize * BytesPerMb / MaxSupportedPageSize)
+                MaxPageCount = (int)(_maxDatabaseSize * BytesPerMb / MaxSupportedPageSize),
             }.ConnectionString;
 
             var sqLiteConnection = new SQLiteConnection(sqlConString, true);
