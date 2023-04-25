@@ -30,7 +30,10 @@ namespace Serilog.Sinks.SQLite
 {
     internal class SQLiteSink : BatchProvider, ILogEventSink
     {
-        private readonly string _databasePath;
+        private readonly string _filename;
+        private readonly string _ext;
+        private readonly string _directory;
+        private readonly string _userInputPath;
         private readonly IFormatProvider _formatProvider;
         private readonly bool _storeTimestampInUtc;
         private readonly uint _maxDatabaseSize;
@@ -56,7 +59,10 @@ namespace Serilog.Sinks.SQLite
             uint maxDatabaseSize = 10,
             bool rollOver = true) : base(batchSize: (int)batchSize, maxBufferSize: 100_000)
         {
-            _databasePath = sqlLiteDbPath;
+            _userInputPath = sqlLiteDbPath;
+            _directory = Path.GetDirectoryName(sqlLiteDbPath);
+            _filename = Path.GetFileNameWithoutExtension(sqlLiteDbPath);
+            _ext = Path.GetExtension(sqlLiteDbPath);
             _tableName = tableName;
             _formatProvider = formatProvider;
             _storeTimestampInUtc = storeTimestampInUtc;
@@ -110,11 +116,17 @@ namespace Serilog.Sinks.SQLite
             }
         }
 
+        private string GetActiveDbPath()
+        {
+            return Path.Combine(_directory ?? "Logs", $"{_filename}-{DateTime.Now:yyyyMMdd}{_ext}");
+        }
+
         private SQLiteConnection GetSqLiteConnection()
         {
             var sqlConString = new SQLiteConnectionStringBuilder
             {
-                DataSource = _databasePath,
+                //DataSource = _databasePath,
+                DataSource = GetActiveDbPath(),
                 JournalMode = SQLiteJournalModeEnum.Wal,
                 SyncMode = SynchronizationModes.Normal,
                 CacheSize = 500,
@@ -242,12 +254,9 @@ namespace Serilog.Sinks.SQLite
                             return true;
                         }
 
-                        var dbExtension = Path.GetExtension(_databasePath);
+                        var newFilePath = Path.Combine(_directory ?? "Logs", $"{_filename}-{DateTime.Now:yyyyMMdd_HHmmss_fff}{_ext}");
 
-                        var newFilePath = Path.Combine(Path.GetDirectoryName(_databasePath) ?? "Logs",
-                            $"{Path.GetFileNameWithoutExtension(_databasePath)}-{DateTime.Now:yyyyMMdd_HHmmss.ff}{dbExtension}");
-                         
-                        File.Copy(_databasePath, newFilePath, true);
+                        File.Copy(GetActiveDbPath(), newFilePath, true);
 
                         TruncateLog(sqlConnection);
                         await WriteToDatabaseAsync(logEventsBatch, sqlConnection).ConfigureAwait(false);
