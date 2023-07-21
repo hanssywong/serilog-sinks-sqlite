@@ -47,6 +47,7 @@ namespace Serilog.Sinks.SQLite
         private const long MaxSupportedPageSize = 4096;
         private const long MaxSupportedDatabaseSize = unchecked(MaxSupportedPageSize * MaxSupportedPages) / 1048576;
         private static SemaphoreSlim semaphoreSlim = new SemaphoreSlim(1, 1);
+        private string PrevFileName { get; set; } = string.Empty;
 
         public SQLiteSink(
             string sqlLiteDbPath,
@@ -110,9 +111,17 @@ namespace Serilog.Sinks.SQLite
 
         private void InitializeDatabase()
         {
-            using (var conn = GetSqLiteConnection())
+            try
             {
-                CreateSqlTable(conn);
+                using (var conn = GetSqLiteConnection())
+                {
+                    CreateSqlTable(conn);
+                }
+            }
+            catch (Exception ex)
+            {
+                SelfLog.WriteLine($"Error: {ex}");
+                throw;
             }
         }
 
@@ -123,10 +132,35 @@ namespace Serilog.Sinks.SQLite
 
         private SQLiteConnection GetSqLiteConnection()
         {
+            var dbPath = GetActiveDbPath();
+            if (string.IsNullOrEmpty(PrevFileName))
+            {
+                PrevFileName = dbPath;
+            }
+            bool isDbExists = File.Exists(dbPath);
+            if (!isDbExists)
+            {
+                SelfLog.WriteLine($"Rolling database to {dbPath}");
+                var prev_sqlConString = new SQLiteConnectionStringBuilder
+                {
+                    DataSource = PrevFileName,
+                    JournalMode = SQLiteJournalModeEnum.Wal,
+                    SyncMode = SynchronizationModes.Normal,
+                    CacheSize = 500,
+                    PageSize = (int)MaxSupportedPageSize,
+                    MaxPageCount = (int)(_maxDatabaseSize * BytesPerMb / MaxSupportedPageSize),
+                }.ConnectionString;
+                var prev_sqLiteConnection = new SQLiteConnection(prev_sqlConString, true);
+                prev_sqLiteConnection.Open();
+                prev_sqLiteConnection.Close();
+                prev_sqLiteConnection.Dispose();
+
+                PrevFileName = dbPath;
+            }
             var sqlConString = new SQLiteConnectionStringBuilder
             {
                 //DataSource = _databasePath,
-                DataSource = GetActiveDbPath(),
+                DataSource = dbPath,
                 JournalMode = SQLiteJournalModeEnum.Wal,
                 SyncMode = SynchronizationModes.Normal,
                 CacheSize = 500,
@@ -136,7 +170,10 @@ namespace Serilog.Sinks.SQLite
 
             var sqLiteConnection = new SQLiteConnection(sqlConString, true);
             sqLiteConnection.Open();
-
+            if (!isDbExists)
+            {
+                CreateSqlTable(sqLiteConnection);
+            }
             return sqLiteConnection;
         }
 
@@ -155,8 +192,10 @@ namespace Serilog.Sinks.SQLite
 
             var sqlCreateText = $"CREATE TABLE IF NOT EXISTS {_tableName} ({colDefs})";
 
-            var sqlCommand = new SQLiteCommand(sqlCreateText, sqlConnection);
-            sqlCommand.ExecuteNonQuery();
+            using (var sqlCommand = new SQLiteCommand(sqlCreateText, sqlConnection))
+            {
+                sqlCommand.ExecuteNonQuery();
+            }
         }
 
         private SQLiteCommand CreateSqlInsertCommand(SQLiteConnection connection)
@@ -198,18 +237,21 @@ namespace Serilog.Sinks.SQLite
 
         private void TruncateLog(SQLiteConnection sqlConnection)
         {
-            var cmd = sqlConnection.CreateCommand();
-            cmd.CommandText = $"DELETE FROM {_tableName}";
-            cmd.ExecuteNonQuery();
-
+            using (var cmd = sqlConnection.CreateCommand())
+            {
+                cmd.CommandText = $"DELETE FROM {_tableName}";
+                cmd.ExecuteNonQuery();
+            }
             VacuumDatabase(sqlConnection);
         }
 
         private void VacuumDatabase(SQLiteConnection sqlConnection)
         {
-            var cmd = sqlConnection.CreateCommand();
-            cmd.CommandText = $"vacuum";
-            cmd.ExecuteNonQuery();
+            using (var cmd = sqlConnection.CreateCommand())
+            {
+                cmd.CommandText = $"vacuum";
+                cmd.ExecuteNonQuery();
+            }
         }
 
         private SQLiteCommand CreateSqlDeleteCommand(SQLiteConnection sqlConnection, DateTimeOffset epoch)
@@ -279,45 +321,53 @@ namespace Serilog.Sinks.SQLite
 
         private async Task WriteToDatabaseAsync(ICollection<LogEvent> logEventsBatch, SQLiteConnection sqlConnection)
         {
-            using (var tr = sqlConnection.BeginTransaction())
+            try
             {
-                using (var sqlCommand = CreateSqlInsertCommand(sqlConnection))
+                using (var tr = sqlConnection.BeginTransaction())
                 {
-                    sqlCommand.Transaction = tr;
-
-                    foreach (var logEvent in logEventsBatch)
+                    using (var sqlCommand = CreateSqlInsertCommand(sqlConnection))
                     {
-                        sqlCommand.Parameters["@timeStamp"].Value = _storeTimestampInUtc
-                            ? logEvent.Timestamp.ToUniversalTime().ToString(TimestampFormat)
-                            : logEvent.Timestamp.ToString(TimestampFormat);
-                        sqlCommand.Parameters["@level"].Value = logEvent.Level.ToString();
-                        if (logEvent.Properties.ContainsKey("ThreadId") && int.TryParse(logEvent.Properties["ThreadId"].ToString(), out int ThreadId))
-                        {
-                            sqlCommand.Parameters["@threadid"].Value = ThreadId;
-                        }
-                        sqlCommand.Parameters["@exception"].Value = logEvent.Exception?.ToString();
-                        sqlCommand.Parameters["@renderedMessage"].Value = logEvent.MessageTemplate.Render(logEvent.Properties, _formatProvider);
+                        sqlCommand.Transaction = tr;
 
-                        if (logEvent.Properties.ContainsKey("MachineName"))
+                        foreach (var logEvent in logEventsBatch)
                         {
-                            sqlCommand.Parameters["@machinename"].Value = logEvent.Properties["MachineName"]?.ToString();
-                        }
-                        if (logEvent.Properties.ContainsKey("MemoryUsage") && int.TryParse(logEvent.Properties["MemoryUsage"].ToString(), out int MemoryUsage))
-                        {
-                            sqlCommand.Parameters["@memoryusage"].Value = MemoryUsage;
-                        }
-                        if (logEvent.Properties.ContainsKey("SourceContext"))
-                        {
-                            sqlCommand.Parameters["@sourcecontext"].Value = logEvent.Properties["SourceContext"]?.ToString();
-                        }
-                        sqlCommand.Parameters["@properties"].Value = logEvent.Properties.Count > 0
-                            ? logEvent.Properties.Json()
-                            : string.Empty;
+                            sqlCommand.Parameters["@timeStamp"].Value = _storeTimestampInUtc
+                                ? logEvent.Timestamp.ToUniversalTime().ToString(TimestampFormat)
+                                : logEvent.Timestamp.ToString(TimestampFormat);
+                            sqlCommand.Parameters["@level"].Value = logEvent.Level.ToString();
+                            if (logEvent.Properties.ContainsKey("ThreadId") && int.TryParse(logEvent.Properties["ThreadId"].ToString(), out int ThreadId))
+                            {
+                                sqlCommand.Parameters["@threadid"].Value = ThreadId;
+                            }
+                            sqlCommand.Parameters["@exception"].Value = logEvent.Exception?.ToString();
+                            sqlCommand.Parameters["@renderedMessage"].Value = logEvent.MessageTemplate.Render(logEvent.Properties, _formatProvider);
 
-                        await sqlCommand.ExecuteNonQueryAsync().ConfigureAwait(false);
+                            if (logEvent.Properties.ContainsKey("MachineName"))
+                            {
+                                sqlCommand.Parameters["@machinename"].Value = logEvent.Properties["MachineName"]?.ToString();
+                            }
+                            if (logEvent.Properties.ContainsKey("MemoryUsage") && int.TryParse(logEvent.Properties["MemoryUsage"].ToString(), out int MemoryUsage))
+                            {
+                                sqlCommand.Parameters["@memoryusage"].Value = MemoryUsage;
+                            }
+                            if (logEvent.Properties.ContainsKey("SourceContext"))
+                            {
+                                sqlCommand.Parameters["@sourcecontext"].Value = logEvent.Properties["SourceContext"]?.ToString();
+                            }
+                            sqlCommand.Parameters["@properties"].Value = logEvent.Properties.Count > 0
+                                ? logEvent.Properties.Json()
+                                : string.Empty;
+
+                            await sqlCommand.ExecuteNonQueryAsync().ConfigureAwait(false);
+                        }
+                        tr.Commit();
                     }
-                    tr.Commit();
                 }
+            }
+            catch (Exception ex)
+            {
+                SelfLog.WriteLine($"Error: {ex}");
+                throw;
             }
         }
     }
